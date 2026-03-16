@@ -2,6 +2,8 @@
 
 ShortcutManager 是一款基于 WPF (.NET 8.0) 开发的轻量级 Windows 桌面快速启动工具。它旨在帮助用户高效地组织和快速访问常用的应用程序、文件、文件夹以及网站链接，提供类似于 macOS Launchpad 或各类 Dock 工具的流畅体验。
 
+![效果](Pic.jpg)
+
 ## ✨ 功能特点 (Features)
 
 *   **拖拽管理 (Drag & Drop)**
