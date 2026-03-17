@@ -1629,6 +1629,7 @@ class Pipe:
             thought_chunks: list[str] = []
             thinking_started_at: Optional[float] = None
             stream_usage_metadata = None
+            last_finish_reason: Optional[Any] = None
 
             try:
                 async for chunk in response_iterator:
@@ -1666,9 +1667,32 @@ class Pipe:
                             yield message
                         return  # Stop generation
 
-                    if chunk.candidates[0].grounding_metadata:
+                    candidate = chunk.candidates[0]
+                    # Track finish_reason from every chunk; the last non-None value wins
+                    if getattr(candidate, "finish_reason", None) is not None:
+                        last_finish_reason = candidate.finish_reason
+
+                    if getattr(candidate, "finish_reason", None) in (
+                        types.FinishReason.SAFETY,
+                        types.FinishReason.PROHIBITED_CONTENT,
+                    ):
+                        block_msg = self._get_safety_block_message(chunk)
+                        if block_msg:
+                            await emit_chat_event(
+                                "chat:finish",
+                                {
+                                    "role": "assistant",
+                                    "content": block_msg,
+                                    "done": True,
+                                    "error": True,
+                                },
+                            )
+                            yield block_msg
+                            return
+
+                    if candidate.grounding_metadata:
                         grounding_metadata_list.append(
-                            chunk.candidates[0].grounding_metadata
+                            candidate.grounding_metadata
                         )
                     # Prefer fine-grained parts to split thoughts vs. normal text
                     parts = []
@@ -1772,10 +1796,51 @@ class Pipe:
                     final_content = ""
 
                 if not final_answer_text.strip() and retry_stream_factory:
-                    if empty_retry_count < max_empty_retries:
+                    # Resolve finish_reason name for logging
+                    _fr_name = (
+                        last_finish_reason.name
+                        if hasattr(last_finish_reason, "name")
+                        else str(last_finish_reason)
+                        if last_finish_reason is not None
+                        else "UNKNOWN"
+                    )
+                    _has_thoughts = bool(thought_chunks)
+                    _has_grounding = bool(grounding_metadata_list)
+                    _ctx = (
+                        f"finish_reason={_fr_name}, "
+                        f"has_thoughts={_has_thoughts}, "
+                        f"has_grounding={_has_grounding}"
+                    )
+
+                    # Non-retryable finish reasons – skip empty-content retries immediately
+                    _non_retryable_reasons = {
+                        "SAFETY", "PROHIBITED_CONTENT", "RECITATION", "IMAGE_SAFETY",
+                        "BLOCKLIST", "SPII",
+                    }
+                    # UNKNOWN + grounding means AFC (Google Search) ran but model produced
+                    # no text. Retrying will just repeat the AFC loop with the same result.
+                    _afc_empty = (_fr_name in ("UNKNOWN", "FINISH_REASON_UNSPECIFIED") and _has_grounding)
+
+                    if _fr_name in _non_retryable_reasons:
+                        self.log.warning(
+                            f"Streaming returned empty content ({_ctx}). "
+                            "Skipping retry (non-retryable policy block)."
+                        )
+                        warning_msg = f"⚠️ [模型未生成有效正文内容，finish_reason={_fr_name}，可能由于安全策略或内容过滤拦截]"
+                        final_content = (final_content + f"\n\n{warning_msg}").strip()
+                    elif _afc_empty:
+                        self.log.warning(
+                            f"Streaming returned empty content ({_ctx}). "
+                            "AFC (Google Search) completed but model generated no text. "
+                            "Skipping retry to avoid redundant search loops."
+                        )
+                        warning_msg = "⚠️ [联网搜索已完成，但模型未生成正文回答，可能当前无法对该话题作答或受内容策略影响]"
+                        final_content = (final_content + f"\n\n{warning_msg}").strip()
+                    elif empty_retry_count < max_empty_retries:
                         empty_retry_count += 1
                         self.log.warning(
-                            f"Streaming returned empty content. Retrying ({empty_retry_count}/{max_empty_retries})"
+                            f"Streaming returned empty content ({_ctx}). "
+                            f"Retrying ({empty_retry_count}/{max_empty_retries})"
                         )
                         if __event_emitter__:
                             await __event_emitter__(
@@ -1783,7 +1848,7 @@ class Pipe:
                                     "type": "status",
                                     "data": {
                                         "action": "retry",
-                                        "description": f"模型返回空内容，正在自动重试（{empty_retry_count}/{max_empty_retries}）",
+                                        "description": f"模型返回空内容（finish_reason={_fr_name}），正在自动重试（{empty_retry_count}/{max_empty_retries}）",
                                         "done": False,
                                     },
                                 }
@@ -1805,7 +1870,7 @@ class Pipe:
                                     },
                                 }
                             )
-                        warning_msg = "⚠️ [模型多次尝试后未生成有效正文内容，可能由于安全策略拦截或当前无法作答]"
+                        warning_msg = f"⚠️ [模型多次尝试后未生成有效正文内容（{_ctx}），可能由于安全策略拦截或当前无法作答]"
                         final_content = (final_content + f"\n\n{warning_msg}").strip()
 
                 # Ensure downstream consumers (UI, TTS) receive the complete response once streaming ends.
