@@ -1643,6 +1643,8 @@ class Pipe:
                         if chunk.prompt_feedback and chunk.prompt_feedback.block_reason:
                             block_reason = chunk.prompt_feedback.block_reason.name
                             message = f"[Blocked due to Prompt Safety: {block_reason}]"
+                            if block_reason == "PROHIBITED_CONTENT":
+                                message += " (通常由敏感词误报引起，建议开启 USE_PERMISSIVE_SAFETY 阀门或更换表述)"
                             await emit_chat_event(
                                 "chat:finish",
                                 {
@@ -2031,7 +2033,7 @@ class Pipe:
             reason = f" ({blocking_rating.category.name})" if blocking_rating else ""
             return f"[Blocked by safety settings{reason}]"
         elif candidate.finish_reason == types.FinishReason.PROHIBITED_CONTENT:
-            return "[Content blocked due to prohibited content policy violation]"
+            return "[Blocked due to Prohibited Content: 疑似由于特定词组触发安全策略 (建议开启 USE_PERMISSIVE_SAFETY 阀门或更换表述)]"
 
         return None
 
